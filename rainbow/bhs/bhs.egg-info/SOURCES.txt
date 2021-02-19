@@ -1,0 +1,7 @@
+README.md
+setup.py
+bhs.egg-info/PKG-INFO
+bhs.egg-info/SOURCES.txt
+bhs.egg-info/dependency_links.txt
+bhs.egg-info/requires.txt
+bhs.egg-info/top_level.txt

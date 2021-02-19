@@ -1,6 +1,8 @@
 import tensorflow as tf
+tf.config.set_visible_devices([], 'GPU') # Use this to run on CPU only
 import numpy as np
-
+import wandb
+wandb.init(name='Rainbow', project="deep-rl-tf2")
 from tensorflow.keras import optimizers, losses
 from tensorflow.keras import Model
 from collections import deque
@@ -8,6 +10,14 @@ from collections import deque
 import collections
 import random
 import gym
+env_dict = gym.envs.registration.registry.env_specs.copy()
+for env in env_dict:
+     if 'bhs' in env:
+          print('Remove {} from registry'.format(env))
+          del gym.envs.registration.registry.env_specs[env]
+import bhs
+
+import matplotlib.pyplot as plt
 
 
 class SumTree:
@@ -154,7 +164,7 @@ class IQN(Model):
     def __init__(self):
         super(IQN, self).__init__()
         
-        self.num_action = 2
+        self.num_action = 128
         self.embedding_dim = 64
 
         self.embedding_out = Embedding(self.embedding_dim)
@@ -163,7 +173,7 @@ class IQN(Model):
         self.layer2 = tf.keras.layers.Dense(64, activation='relu')
 
         self.h_fc1 = tf.keras.layers.Dense(64, activation='relu')
-        self.state = tf.keras.layers.Dense(self.num_action)
+        self.state = tf.keras.layers.Dense(1)
         self.advantage = tf.keras.layers.Dense(self.num_action)
 
 
@@ -205,9 +215,9 @@ class Agent:
         self.train_tau_max = 1.0
 
         self.train_num_quantile = 8
-        self.batch_size = 64
-        self.state_size = 4
-        self.action_size = 2
+        self.batch_size = 32
+        self.state_size = [101,7]
+        self.action_size = 128
         self.n_step = 5
 
         self.iqn_model = IQN()
@@ -230,7 +240,7 @@ class Agent:
             reward = np.sum([np.power(self.gamma, i) * r for i, r in enumerate(reward)])
 
             _, Q_batch, _ = self.iqn_model(
-            tf.convert_to_tensor([next_state], dtype=tf.float32),
+            tf.convert_to_tensor([next_state], dtype=tf.bool),
             self.get_action_num_quantile, self.get_action_tau_min,
             self.get_action_tau_max)
 
@@ -238,7 +248,7 @@ class Agent:
             next_action = np.argmax(Q_batch)
 
             _, target_Q_batch, _ = self.iqn_target(
-            tf.convert_to_tensor([next_state], dtype=tf.float32),
+            tf.convert_to_tensor([next_state], dtype=tf.bool),
             self.get_action_num_quantile, self.get_action_tau_min,
             self.get_action_tau_max)
 
@@ -248,7 +258,7 @@ class Agent:
             target_value = target_value * np.power(self.gamma, self.n_step) * (1-done) + reward
         
             _, Q_batch, _ = self.iqn_model(
-                tf.convert_to_tensor([state], dtype=tf.float32),
+                tf.convert_to_tensor([state], dtype=tf.bool),
                 self.get_action_num_quantile, self.get_action_tau_min,
                 self.get_action_tau_max)
         
@@ -260,7 +270,7 @@ class Agent:
             self.memory.add(td_error, (state, action, reward, next_state, done))
 
     def get_action(self, state, epsilon):
-        state = tf.convert_to_tensor([state], dtype=tf.float32)
+        state = tf.convert_to_tensor([state], dtype=tf.bool)
         _, q_value, _ = self.iqn_model(
                         state, self.get_action_num_quantile,
                         self.get_action_tau_min, self.get_action_tau_max)
@@ -285,11 +295,11 @@ class Agent:
         dones = np.stack([i[4] for i in mini_batch])
 
         _, Q_batch, _ = self.iqn_model(
-            tf.convert_to_tensor(np.stack(next_states), dtype=tf.float32),
+            tf.convert_to_tensor(np.stack(next_states), dtype=tf.bool),
             self.train_num_quantile, self.train_tau_min,
             self.train_tau_max)
         theta_batch, next_target_Q, _ = self.iqn_target(
-            tf.convert_to_tensor(np.stack(next_states), dtype=tf.float32),
+            tf.convert_to_tensor(np.stack(next_states), dtype=tf.bool),
             self.train_num_quantile, self.train_tau_min,
             self.train_tau_max)
 
@@ -319,7 +329,7 @@ class Agent:
             theta_target = tf.convert_to_tensor(theta_target, dtype=tf.float32)
             action_binary_loss = tf.convert_to_tensor(action_binary, dtype=tf.float32)
             logits, _, sample = self.iqn_model(
-                        tf.convert_to_tensor(np.stack(states), dtype=tf.float32),
+                        tf.convert_to_tensor(np.stack(states), dtype=tf.bool),
                         self.train_num_quantile, self.train_tau_min,
                         self.train_tau_max)
             theta_pred = tf.reduce_sum(tf.multiply(logits, action_binary_loss), axis=2)
@@ -344,7 +354,7 @@ class Agent:
         self.opt.apply_gradients(zip(grads, iqn_variable))
 
         _, main_q, _ = self.iqn_model(
-            tf.convert_to_tensor(states, dtype=tf.float32),
+            tf.convert_to_tensor(states, dtype=tf.bool),
             self.train_num_quantile, self.train_tau_min,
             self.train_tau_max)
 
@@ -358,23 +368,29 @@ class Agent:
             self.memory.update(idx, td_error[i])
         
     def run(self):
-
-        env = gym.make('CartPole-v1')
+        test_frq = 10
+        env = gym.make('bhs-v1')
+        env.randomize_numtotes=True
+        state_size = env.observation_space.shape[0]*env.observation_space.shape[1]
         episode = 0
         step = 0
-
+        env.reset(total=True)
+        scores=[]
+        numtotes_list=[]
         while True:
-            state = env.reset()
+            state = env.reset(episode % 10 == 0)
+            state = tf.reshape(state,state_size)
             done = False
             episode += 1
-            epsilon = 1 / (episode * 0.1 + 1)
+            epsilon = 0.5 / (episode * 0.01 + 1)
             score = 0
             while not done:
                 step += 1
                 action, q_value = self.get_action(state, epsilon)
-                next_state, reward, done, info = env.step(action)
+                next_state, reward, done, _ = env.step(action)
+                next_state = tf.reshape(next_state,state_size)
 
-                self.append_sample(state, action, reward, next_state, done)
+                self.append_sample(state, action, reward, next_state, env.deadlock)
                 
                 score += reward
 
@@ -382,12 +398,58 @@ class Agent:
 
                 if step > 100:
                     self.update()
-                    if step % 20 == 0:
+                    if step % 2000 == 0:
                         self.update_target()
+            
+            if episode % test_frq == 0:
+                test_score = self.test(seed=1000)
+                wandb.log({'Test/Reward/10 totes': test_score[0]})
+                wandb.log({'Test/Reward/30 totes': test_score[1]})
+                wandb.log({'Test/Reward/50 totes': test_score[2]})
+                wandb.log({'Test/Reward/70 totes': test_score[3]})
+                wandb.log({'Test/Reward/90 totes': test_score[4]})
+            print('EP{} EpisodeReward={}'.format(episode, score))
+            wandb.log({'Train/Reward': score})
+            wandb.log({'Train/Number of totes': env.numtotes})
+            wandb.log({'Train/Epsilon': epsilon})
+            if env.numtotes in numtotes_list:
+                idx = numtotes_list.index(env.numtotes)
+                scores[idx] = scores[idx]*0.9+score*0.1
+            else:
+                scores.append(score)
+                numtotes_list.append(env.numtotes)
+            
+            data = [[x, y] for (x, y) in zip(numtotes_list, scores)]
+            table = wandb.Table(data=data, columns = ["Train/Number of totes", "Train/Reward"])
+            wandb.log({"RewardForNumtotes" : wandb.plot.scatter(table, "Train/Number of totes", "Train/Reward")})
+            print(episode, "{:.3f}".format(epsilon), score)
 
-            print(episode, score)
-
-
+    def test(self,seed=0):
+        #def test(dqn, env_test, args, seed=1000):
+        print("Testing")
+        env = gym.make('bhs-v1')
+        state_size = env.observation_space.shape[0]*env.observation_space.shape[1]
+        scores = []
+        for i in [10,30,50,70,90]:
+            state = env.reset(total=True, seed=seed, numtotes = i)
+            state = tf.reshape(state,state_size)
+            score = 0
+            for step in range(env.steplimit):
+                # Choose action
+                action, _ = self.get_action(state, 0)
+                
+                # Perform action in environment and take a step
+                state, rew, done, _ = env.step(action)
+                state = tf.reshape(state,state_size)
+                score += rew
+                if done:
+                    print("Number of steps: ", step+1)
+                    print("Score: ", score)
+                    break
+            scores.append(score)        
+        print("Done testing")
+        return scores
+    
 if __name__ == '__main__':
     agent = Agent()
     agent.run()
